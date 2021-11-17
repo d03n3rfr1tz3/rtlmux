@@ -492,7 +492,7 @@ void *serverThread(void *arg) {
 
   evhttp_set_cb(http, "/stats.json", dumpClients, "clients");
   
-  handle = evhttp_bind_socket_with_handle(http, "::", config.clientPort + 1);
+  handle = evhttp_bind_socket_with_handle(http, "0.0.0.0", config.clientPort + 1);
 
   if(!handle) {
     slog(LOG_FATAL, SLOG_FATAL, "Could not bind HTTP listener.");
