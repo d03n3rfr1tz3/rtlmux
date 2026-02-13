@@ -7,6 +7,7 @@
 #include <time.h>
 #include <stdarg.h>
 #include <math.h>
+#include <sys/wait.h>
 
 #include <event2/event.h>
 #include <event2/thread.h>
@@ -159,6 +160,29 @@ static void logCB(int severity, const char *msg) {
   slog(level, flag, msg);
 }
 
+static void executeScript(const char *scriptName) {
+  char command[512];
+  snprintf(command, sizeof(command), "./rtlmux_%s.sh", scriptName);
+  
+  // Check if script exists and is executable
+  if(access(command, X_OK) == 0) {
+    slog(LOG_INFO, SLOG_INFO, "Executing script: %s", command);
+    int ret = system(command);
+    if(ret == -1) {
+      slog(LOG_ERROR, SLOG_ERROR, "Failed to execute script: %s", command);
+    } else if(WIFEXITED(ret)) {
+      int exit_status = WEXITSTATUS(ret);
+      if(exit_status != 0) {
+        slog(LOG_WARN, SLOG_WARN, "Script %s exited with status: %d", command, exit_status);
+      } else {
+        slog(LOG_INFO, SLOG_INFO, "Script %s executed successfully", command);
+      }
+    }
+  } else {
+    slog(LOG_DEBUG, SLOG_DEBUG, "Script %s not found or not executable", command);
+  }
+}
+
 struct serverInfo {
   enum { SERVER_NEW, SERVER_CONNECTED, SERVER_DISCONNECTED } state;
   char magic[4];
@@ -287,6 +311,20 @@ static void errorEventCB(struct bufferevent *bev, short events, void *ctx) {
     slog(LOG_INFO, SLOG_INFO, "Disconnecting client %s", ipBuf);
     bufferevent_free(bev);
     removeClient(client);
+    
+    // Check if this was the last client
+    int isLastClient = 0;
+    pthread_rwlock_rdlock(&clientLock);
+    if(LIST_FIRST(&clients) == NULL) {
+      isLastClient = 1;
+    }
+    pthread_rwlock_unlock(&clientLock);
+    
+    // Execute onidle script if this was the last client
+    if(isLastClient) {
+      slog(LOG_INFO, SLOG_INFO, "Last client disconnected, executing onidle script");
+      executeScript("onidle");
+    }
   }
 }
 
@@ -388,6 +426,14 @@ static void connectCB(struct evconnlistener *listener,
             base, sock, BEV_OPT_CLOSE_ON_FREE);
 #endif
 
+    // Check if this is the first client
+    int isFirstClient = 0;
+    pthread_rwlock_rdlock(&clientLock);
+    if(LIST_FIRST(&clients) == NULL) {
+      isFirstClient = 1;
+    }
+    pthread_rwlock_unlock(&clientLock);
+
     struct client *client = addClient(bev, ptr);
     memcpy(&client->sa, addr, len);
     char ipBuf[128];
@@ -398,6 +444,13 @@ static void connectCB(struct evconnlistener *listener,
     else
       snprintf(ipBuf, 128, "from unknown address");
     slog(LOG_INFO, SLOG_INFO, "Connection from client %s", ipBuf);
+    
+    // Execute onactive script if this is the first client
+    if(isFirstClient) {
+      slog(LOG_INFO, SLOG_INFO, "First client connected, executing onactive script");
+      executeScript("onactive");
+    }
+    
     bufferevent_setcb(bev, clientReadCB, NULL, errorEventCB, client);
     bufferevent_setwatermark(bev, EV_WRITE, 0, 4*1024*1024); // Limit output to 4MB?
     bufferevent_enable(bev, EV_READ|EV_WRITE);
